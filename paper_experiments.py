@@ -58,6 +58,9 @@ class StandardizedBenchmark(Benchmark):
     def square_cost(self, level, a, b):
         if b <= a:
             return 0.0
+        if self.name == 'lognormal':
+            # Evaluate the stable lognormal cost in its original loss scale.
+            return self.base.square_cost(self.center + self.sd * level, a, b) / self.sd ** 2
         if self.name == 'uniform':
             left = level - float(self.quantile(a))
             right = level - float(self.quantile(b))
@@ -79,6 +82,10 @@ class JumpBenchmark(StandardizedBenchmark):
     def quantile(self, u):
         u = np.asarray(u)
         return (u + JUMP * (u > ALPHA) - self.center) / self.sd
+
+    def cdf(self, x):
+        raw = self.center + self.sd * np.asarray(x)
+        return np.clip(raw, 0, ALPHA) + np.clip(raw - ALPHA - JUMP, 0, 1 - ALPHA)
 
     def moment(self, a, b, order=1):
         total = 0.0

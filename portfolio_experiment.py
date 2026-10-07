@@ -47,13 +47,19 @@ def covariance(correlation):
 
 class ScalarModel:
     def __init__(self, cells=4000):
+        if not isinstance(cells, (int, np.integer)) or cells < 2:
+            raise ValueError('cells must be an integer of at least 2.')
         self.cells = cells
         self.cut = brentq(lambda u: tk_derivative(u) - tk(u) / u, 0.05, 0.99)
         sine = np.sin(np.linspace(0, np.pi / 2, cells + 1)) ** 2
         knots = sine ** 2 / (sine ** 2 + (1 - sine) ** 2)
         knots[0], knots[-1] = 0.0, 1.0
-        knots[np.argmin(abs(knots - self.cut))] = self.cut
+        # Keep the probability endpoints fixed, even for coarse grids.
+        knots[1 + np.argmin(abs(knots[1:-1] - self.cut))] = self.cut
         self.mass = np.diff(knots)
+        if (not np.all(self.mass > 0)
+                or not np.isclose(self.mass.sum(), 1.0, rtol=0, atol=1e-14)):
+            raise ValueError('Grid masses must be positive and sum to one.')
         benchmark = Benchmark('normal')
         self.quantile = np.array([benchmark.moment(a, b) / (b - a)
                                   for a, b in zip(knots[:-1], knots[1:])])
@@ -87,6 +93,9 @@ class ScalarModel:
 
     def candidate(self, radius):
         radius = np.asarray(radius)
+        if self.variance == 0:
+            # No pooling: the envelope shift is exact, including radius zero.
+            return self.nominal + radius * self.norm
         return (self.nominal + radius * (self.benchmark_gap + radius * self.norm)
                 / np.sqrt(self.variance + radius ** 2))
 
@@ -262,14 +271,15 @@ def main():
         scalar = read_csv('portfolio_scalar.csv')
         model.radii = np.array([row['radius'] for row in scalar])
         model.values = np.array([row['value'] for row in scalar])
+        model.precompute_seconds = 0.0  # No scalar precomputation in this cached run.
     else:
         model.prepare()
         weights = simplex()
         records = decision_records(model, weights)
         save_csv('portfolio_decisions.csv', records)
-        if not args.skip_verification:
-            report = verify(model, weights, records)
-            (DATA / 'portfolio_verification.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+    if not args.skip_verification:
+        report = verify(model, simplex(), records)
+        (DATA / 'portfolio_verification.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     write_tables(model, records)
 
 

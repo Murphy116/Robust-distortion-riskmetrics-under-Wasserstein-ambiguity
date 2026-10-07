@@ -71,8 +71,39 @@ class Benchmark:
         return b - a + za_pdf - zb_pdf
 
     def square_cost(self, level, a, b):
-        return (level * level * (b - a) - 2 * level * self.moment(a, b)
-                + self.moment(a, b, 2))
+        if b <= a:
+            return 0.0
+        first, second = self.moment(a, b), self.moment(a, b, 2)
+        value = level * level * (b - a) - 2 * level * first + second
+        scale = abs(level * level * (b - a)) + abs(2 * level * first) + abs(second)
+        if self.name == "normal" and (b - a < 1e-4 or value <= 1e-8 * scale):
+            # Integrate the positive integrand when moment subtraction loses precision.
+            left, right = ndtri([a, b])
+            if np.isfinite(left) and np.isfinite(right):
+                width = right - left
+                return width * quad(
+                    lambda t: (level - left - width * t) ** 2
+                    * normal_density(left + width * t),
+                    0, 1, epsabs=0, epsrel=1e-10)[0]
+            return quad(lambda z: (level - z) ** 2 * normal_density(z),
+                        left, right, epsabs=0, epsrel=1e-10)[0]
+        if self.name == "lognormal" and (b - a < 1e-3 or value <= 1e-6 * scale):
+            # X=exp(Z): use a positive integrand, not cancellation of moments.
+            left, right = ndtri([a, b])
+            if np.isfinite(left) and np.isfinite(right):
+                width = right - left
+                base = np.exp(left)
+                offset = level - base
+                return width * quad(
+                    lambda t: (offset - base * np.expm1(width * t)) ** 2
+                    * normal_density(left + width * t),
+                    0, 1, epsabs=0, epsrel=1e-10)[0]
+            # Absorb the Gaussian factor before squaring to avoid overflow
+            # when an endpoint in the normal coordinate is infinite.
+            return quad(lambda z: (level * np.exp(-z * z / 4)
+                                   - np.exp(z - z * z / 4)) ** 2 / np.sqrt(2 * np.pi),
+                        left, right, epsabs=0, epsrel=1e-10)[0]
+        return value
 
     def expected_shortfall(self, alpha):
         return self.moment(alpha, 1) / (1 - alpha)
@@ -80,6 +111,8 @@ class Benchmark:
 
 def worst_var(benchmark, alpha, radius):
     lower = float(benchmark.quantile(alpha))
+    if radius == 0:
+        return lower
     upper = benchmark.expected_shortfall(alpha) + radius / np.sqrt(1 - alpha)
 
     def residual(level):
@@ -168,12 +201,18 @@ def tk_constants(benchmark):
 
 
 def tk_grid(benchmark, cells, cut):
+    if not isinstance(cells, (int, np.integer)) or cells < 2:
+        raise ValueError("cells must be an integer of at least 2.")
+    if not np.isfinite(cut) or not 0 < cut < 1:
+        raise ValueError("cut must lie strictly between 0 and 1.")
     sine_squared = np.sin(np.linspace(0, np.pi / 2, cells + 1)) ** 2
     knots = sine_squared ** 2 / (sine_squared ** 2 + (1 - sine_squared) ** 2)
     knots[0], knots[-1] = 0.0, 1.0
-    knots[np.argmin(abs(knots - cut))] = cut
+    # Move an interior knot only; 0 and 1 must remain probability endpoints.
+    knots[1 + np.argmin(abs(knots[1:-1] - cut))] = cut
     weights = np.diff(knots)
-    assert np.min(weights) > 0
+    if not np.all(weights > 0) or not np.isclose(weights.sum(), 1.0, rtol=0, atol=1e-14):
+        raise ValueError("Grid masses must be positive and sum to one.")
     means = np.array([benchmark.moment(a, b) / (b - a)
                       for a, b in zip(knots[:-1], knots[1:])])
     density = (tk(1 - knots[:-1]) - tk(1 - knots[1:])) / weights
@@ -191,7 +230,8 @@ def tk_grid(benchmark, cells, cut):
 
 
 def grid_optimum(means, density, weights, radius):
-    if radius == 0:
+    # A zero objective does not require exhausting the transport budget.
+    if radius == 0 or np.all(np.asarray(density) == 0):
         return means.copy(), 0.0
 
     def residual(scale):

@@ -37,10 +37,22 @@ def read_csv(name):
 
 
 def upper_cost(level):
+    level = np.asarray(level, dtype=float)
     z = ndtri(ALPHA)
     mass = ndtr(level) - ALPHA
-    return ((level * level + 1) * mass + (z - 2 * level) * normal_density(z)
-            + level * normal_density(level))
+    value = ((level * level + 1) * mass + (z - 2 * level) * normal_density(z)
+             + level * normal_density(level))
+    delta = level - z
+    small = (delta > 0) & (delta < 1e-3)
+    if np.any(small):
+        value = np.array(value, copy=True)
+        for index in zip(*np.nonzero(small)) if level.ndim else [()]:
+            d = float(delta[index])
+            # x = z + d*t avoids cancellation in the short-interval cost.
+            value[index] = d ** 3 * quad(
+                lambda t: (1 - t) ** 2 * normal_density(z + d * t),
+                0, 1, epsabs=0, epsrel=1e-12)[0]
+    return np.where(delta <= 0, 0.0, value)
 
 
 def original_scalar(radius):
@@ -120,9 +132,20 @@ def decisions(tables, denominator=200):
                 interpolation_error = float(np.max(abs(exact - estimates[candidates])))
                 index = int(candidates[np.argmin(exact)])
                 value = float(np.min(exact))
-                cutoff = float(np.partition(estimates, 32)[32])
-                assert cutoff - value > 2 * interpolation_error
                 assert interpolation_error < 2e-8
+                # S is nondecreasing in radius. A left node therefore bounds
+                # every portfolio from below, unlike the top-32 interpolation errors.
+                nodes = tables[eta].x
+                left = np.searchsorted(nodes, radii, side='right') - 1
+                lower_bounds = scales * tables[eta](nodes[left])
+                unchecked = lower_bounds <= value + 2e-10
+                unchecked[candidates] = False
+                for i in np.flatnonzero(unchecked):
+                    direct = scales[i] * regularized_scalar(eta, radii[i])
+                    if direct < value - 2e-10:
+                        raise RuntimeError(
+                            'Top-32 selection missed a grid minimum; increase the '
+                            'candidate count or refine the scalar grid before reporting results.')
             w = weights[index]
             assert abs(w.sum() - 1) < 1e-12 and np.min(w) >= 0
             assert value >= original[index] - 2e-10
